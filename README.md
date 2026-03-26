@@ -127,6 +127,13 @@ Total AttnRes overhead: **0.03% parameters**, **<2% latency**.
 ## Citation
 
 ```bibtex
+@software{luo2025openattnres,
+  title={Open Attention Residuals},
+  author={Cheng Luo and Zefan Cai},
+  url={https://github.com/wdlctc/open-attention-residuals},
+  year={2025}
+}
+
 @article{kimi2025attention,
   title={Attention Residuals},
   author={Kimi Team},
@@ -137,6 +144,6 @@ Total AttnRes overhead: **0.03% parameters**, **<2% latency**.
 
 ## Acknowledgments
 
-- [Attention Residuals](https://arxiv.org/abs/2603.15031) — Kimi Team
+- [Attention Residuals](https://arxiv.org/abs/2603.15031) — Kimi Team (original paper)
 - [Qwen3](https://arxiv.org/abs/2505.09388) — Qwen Team (base architecture)
 - [qibin0506/Cortex](https://github.com/qibin0506/Cortex) — Independent AttnRes implementation
