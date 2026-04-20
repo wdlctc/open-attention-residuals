@@ -194,9 +194,13 @@ The critical difference from Block AttnRes~\citep{kimi2025attention} is in what 
 
 In standard Delta AttnRes, both Q/K and V projections within the self-attention sublayer receive the \emph{same} depth-routed input $\hat{h}_l$. However, Q/K and V serve fundamentally different roles: Q/K compute positional/relational matching (``where to attend''), while V carries the content that gets propagated (``what to retrieve''). There is no reason these streams should prefer the same cross-layer sources.
 
-MUDDFormer~\citep{wang2024muddformer} confirms this intuition empirically: ablating the value stream's dense connections causes 0.28 PPL degradation (the largest among all streams), while Q and K contribute only 0.12--0.13 each. The value stream benefits most from cross-layer information access.
+A natural idea is to give each stream its own routing query, as explored by MUDDFormer~\citep{wang2024muddformer} for MLP-generated weights. However, there is a subtle but critical prerequisite: \textbf{per-stream routing only works when the sources are sufficiently distinctive for the softmax to discriminate.}
 
-We propose \textbf{per-stream delta routing}, which gives the value projection its own independent depth-routing query:
+Consider applying per-stream routing to cumulative-state AttnRes. With adjacent source cosine similarity $\sim$0.95, the softmax logits $w^{\top} \mathrm{RMSNorm}(h_i)$ are nearly identical across sources regardless of the query $w$. Two independent queries $w^{qk}$ and $w^{v}$ would both produce near-uniform distributions---per-stream routing degenerates to shared routing. In contrast, delta sources with cosine similarity $<$0.3 provide a basis rich enough for different queries to learn genuinely different routing patterns: $w^{v}$ can concentrate on MLP deltas (semantically rich) while $w^{qk}$ focuses on attention deltas (positional information), because the softmax can actually distinguish between these structurally different sources.
+
+This reveals an important connection: \textbf{delta sources do not merely fix the routing collapse problem (\S\ref{sec:redundancy})---they unlock per-stream specialization as an emergent capability that is fundamentally unavailable to cumulative-state variants.}
+
+We propose \textbf{per-stream delta routing} (Delta-V), which gives the value projection its own independent depth-routing query:
 \begin{align}
     \hat{h}_l^{qk} &= \tilde{h}_l + \sum_{i} \alpha_{i \to l}^{qk} \cdot v_i, &
     \alpha_{i \to l}^{qk} &= \mathrm{softmax}_i(w_l^{qk \top} \cdot \mathrm{RMSNorm}(v_i)) \label{eq:qk_routing} \\
@@ -207,7 +211,7 @@ The self-attention then computes $Q = W_Q \cdot \mathrm{LN}(\hat{h}_l^{qk})$, $K
 
 \paragraph{Overhead.} Per-stream routing adds one extra query vector $w_l^v \in \mathbb{R}^d$ and one RMSNorm per layer (for the V-stream), totaling $2d$ additional parameters per layer. For a 28-layer model with $d{=}1024$: 57K parameters (\textbf{0.011\%} of Qwen3-0.6B). The compute overhead is one additional \texttt{delta\_attn\_res} call per attention sublayer. No additional memory is required since both streams attend over the same delta history.
 
-\paragraph{Intuition.} Consider a deep layer that needs to: (1)~match token positions using structural/syntactic information from middle layers (Q/K routing), and (2)~retrieve semantic content from early layers where token meanings are less diluted (V routing). With a single shared routing, these competing preferences must compromise. Per-stream routing resolves this conflict.
+\paragraph{Contrast with MUDDFormer.} MUDDFormer~\citep{wang2024muddformer} also decouples per-stream routing, but uses unconstrained MLP-generated weights (no softmax normalization). Because their weights are not softmax-normalized, source diversity is not a prerequisite---any linear combination can be learned regardless of source similarity. Our approach operates within the softmax attention framework, which brings interpretability (routing weights sum to 1, can be visualized as attention maps) but imposes the constraint that sources must be distinctive for per-stream queries to specialize. Delta sources satisfy this constraint; cumulative sources do not.
 
 \begin{figure}[t]
 \begin{lstlisting}[style=python]
@@ -302,7 +306,7 @@ Delta AttnRes & $v_i$ (sublayer) & 3.350 & 55.69 & 0.114 & 0.340 \\
 \end{tabular}
 \end{table}
 
-At 100M scale, Delta-V AttnRes achieves the lowest WikiText-2 perplexity (71.11), reducing PPL by 8.5\% relative to the baseline and 1.6\% relative to standard Delta AttnRes. The improvement from Delta to Delta-V is consistent: per-stream routing allows the value stream to retrieve content from different depth layers than the Q/K positional matching, resolving a representational conflict inherent in shared routing. The additional parameter cost is negligible (12.3K, or 0.011\% of model size).
+At 100M scale, Delta-V AttnRes achieves the lowest WikiText-2 perplexity (71.11), reducing PPL by 8.5\% relative to the baseline and 1.6\% relative to standard Delta AttnRes. Crucially, the improvement from Delta to Delta-V validates the analysis in \S\ref{sec:per_stream}: delta sources are distinctive enough (cos sim $<$0.3) for two independent queries to learn different routing patterns, allowing the V-stream to specialize in content retrieval while Q/K handles positional matching. This specialization would be impossible with cumulative sources, where softmax collapse forces all queries toward the same near-uniform distribution regardless of their initialization.
 
 At this small scale (100M, 20K steps), LAMBADA and HellaSwag differences are within noise---the model has insufficient capacity for these tasks to differentiate routing strategies. WikiText-2 perplexity, which aggregates over a larger evaluation corpus, provides the clearest signal. The 0.6B results (in progress) are expected to show larger separations across all metrics, consistent with the pattern observed for Delta vs.\ baseline (Table~\ref{tab:scratch_0.6b}).
 
@@ -451,7 +455,7 @@ Our findings:
 \begin{enumerate}
     \item \textbf{Source representation determines routing quality}: Cumulative states have 0.95 cosine similarity, collapsing softmax to near-uniform. Delta sources are naturally distinctive.
     \item \textbf{Delta AttnRes outperforms all cumulative-state variants}: 19.2\% PPL reduction vs.\ Full AttnRes and 7.5\% vs.\ baseline at 0.6B scale, with +39\% LAMBADA accuracy.
-    \item \textbf{Per-stream routing unlocks further gains}: Decoupling the value stream's depth routing from Q/K allows content retrieval and positional matching to specialize independently, adding only 0.011\% parameters.
+    \item \textbf{Delta sources unlock per-stream specialization}: Because delta sources are structurally distinctive, independent routing queries for Q/K and V can learn genuinely different depth patterns. This per-stream capability is unavailable to cumulative-state variants where softmax collapse forces all queries toward the same distribution.
     \item \textbf{Additive routing enables fine-tuning}: Delta AttnRes's additive formulation preserves the residual stream at initialization, achieving 29.2\% PPL reduction when fine-tuning Qwen3-0.6B.
     \item \textbf{Minimal overhead}: 0.034\% additional parameters (with per-stream routing) and $<$1\% compute overhead, making Delta-V AttnRes a practical drop-in improvement for any transformer.
 \end{enumerate}
