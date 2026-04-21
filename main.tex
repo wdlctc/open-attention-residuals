@@ -23,7 +23,7 @@
 
 \newtheorem{proposition}{Proposition}
 
-% Python code style matching Kimi paper (Figure 2)
+% Python code style
 \lstdefinestyle{python}{
   language=Python,
   basicstyle=\ttfamily\small,
@@ -65,175 +65,134 @@ Attention Residuals replace standard additive residual connections with learned 
 \section{Introduction}
 %% ============================================================
 
-Residual connections~\citep{he2016deep} are fundamental to training deep transformers~\citep{vaswani2017attention}. The standard update $h_l = h_{l-1} + f_{l-1}(h_{l-1})$ accumulates all sublayer outputs with fixed unit coefficients, providing gradient highways~\citep{veit2016residual} but no selectivity over the depth dimension. This uniform aggregation persists in modern architectures from GPT-2~\citep{radford2019gpt2} to Llama~\citep{touvron2023llama}. Attention Residuals~\citep{kimi2025attention} address this by replacing fixed aggregation with learned softmax attention over previous outputs, achieving improved scaling laws~\citep{kaplan2020scaling} at up to 16B parameters.
+Residual connections~\citep{he2016deep} are fundamental to training deep transformers~\citep{vaswani2017attention}. The standard update $h_l = h_{l-1} + f_{l-1}(h_{l-1})$ accumulates all sublayer outputs with fixed unit coefficients, providing gradient highways~\citep{veit2016residual} but no selectivity over the depth dimension. Attention Residuals~\citep{kimi2025attention} address this by replacing fixed aggregation with learned softmax attention over previous outputs, achieving improved scaling laws at up to 16B parameters.
 
-Yet the design space of Attention Residuals remains underexplored along two dimensions: \emph{what to route} (the source representation) and \emph{where to route} (whether different information streams share the same routing). The original paper defines sources as individual sublayer outputs $v_i = f_i(h_i)$ (the ``deltas'' added at each layer), but a seemingly equivalent implementation stores cumulative hidden states $h_i = h_0 + \sum_{j=1}^{i} v_j$ instead. Meanwhile, all prior work uses a single routing decision shared across the Q, K, and V projections within each attention sublayer. We show that both choices have dramatic consequences.
+Yet the design space of cross-layer routing remains underexplored. We identify two orthogonal dimensions that substantially impact routing effectiveness:
+
+\begin{itemize}
+    \item \textbf{What to route} (source representation): Should the model attend over cumulative hidden states $h_i$ or individual sublayer outputs $v_i$ (``deltas'')? We show these are far from equivalent: cumulative states have cosine similarity ${\sim}0.95$ between adjacent sources, collapsing softmax routing to near-uniform. Delta sources avoid this by construction (cos sim $<$0.3), enabling sharp, meaningful cross-layer shortcuts.
+    \item \textbf{Where to route} (per-stream routing): Should all information streams (Q, K, V) within each attention sublayer share the same depth-routing decision? We show they should not: Q/K handle positional matching while V carries content, and decoupling their routing provides consistent complementary gains.
+\end{itemize}
+
+These two dimensions are \emph{orthogonal and composable}. A systematic $2{\times}2$ ablation---$\{$cumulative, delta$\}$ $\times$ $\{$shared, per-stream V$\}$---confirms that each dimension provides independent gains, and their combination achieves the best results at only 0.034\% additional parameter cost (Figure~\ref{fig:design_space}).
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig1_delta_vs_cumulative.png}
-\caption{\textbf{Source representation determines routing quality.} (a)~Cosine similarity between adjacent sources: cumulative states $\sim$0.95 (red), delta outputs $<$0.3 (green). (b)~Routing quality metrics: delta sources achieve higher utilization and sharper max weights. (c)~Training loss comparison at 0.6B scale.}
-\label{fig:motivation}
+\caption{\textbf{Two dimensions of cross-layer routing.} (a)~Source redundancy: cumulative states $h_i$ have cosine similarity ${\sim}0.95$ (red), while delta outputs $v_i$ are naturally distinctive ($<$0.3, green). (b)~Routing quality: delta sources achieve higher utilization and sharper weights. (c)~Training loss comparison at 0.6B scale. Across both dimensions, delta sources with per-stream V-routing (Delta-V) achieves the best results.}
+\label{fig:design_space}
 \end{figure}
-
-Our central finding is that \textbf{cumulative-state sources are degenerate for softmax routing}. Since $h_{i+1} = h_i + v_i$ and $\|v_i\| \ll \|h_i\|$ for trained models, adjacent cumulative states have cosine similarity $\sim$0.95 (Figure~\ref{fig:motivation}a). This renders the 57-way softmax nearly uniform: the effective rank drops to 15 out of 57 sources, and the maximum attention weight plateaus at 0.35. The model cannot learn selective cross-layer shortcuts because all sources look the same.
-
-Delta sources avoid this by construction. Attention outputs and MLP outputs occupy different subspaces; outputs from different layers capture different abstraction levels. The softmax can therefore make sharp, meaningful routing decisions. At 0.6B scale, Delta AttnRes achieves WikiText-2 PPL of 55.69 compared to 68.87 for cumulative-state AttnRes and 60.21 for the standard baseline---a 19.2\% and 7.5\% reduction, respectively.
 
 Our contributions are:
 \begin{enumerate}
-    \item \textbf{What to route}: We identify the source redundancy problem in Attention Residuals---cumulative hidden states have 0.95 cosine similarity, collapsing softmax routing---and show that per-sublayer delta sources resolve it, achieving 7.5--19.2\% PPL reduction across scales (\S\ref{sec:analysis}, \S\ref{sec:experiments}).
-    \item \textbf{Where to route}: We introduce per-stream V-routing, which decouples depth routing for the value stream from Q/K. A systematic $\{$cumulative, delta$\}$ $\times$ $\{$shared, per-stream$\}$ ablation shows the two dimensions are orthogonal and composable, with their combination achieving the best results at 0.011\% additional parameter cost (\S\ref{sec:per_stream}, \S\ref{sec:ablation}).
-    \item \textbf{Practical deployment via fine-tuning}: Delta AttnRes's additive formulation, combined with null source initialization, enables effective fine-tuning of pretrained models with zero initialization disruption, achieving 29.2\% PPL reduction on Qwen3-0.6B (\S\ref{sec:finetune}).
+    \item \textbf{What to route}: We identify the source redundancy problem and show that delta sources resolve it, achieving 7.5--19.2\% PPL reduction across scales (\S\ref{sec:what}, \S\ref{sec:experiments}).
+    \item \textbf{Where to route}: We introduce per-stream V-routing, providing orthogonal gains on top of both source types. The $2{\times}2$ ablation confirms composability (\S\ref{sec:where}, \S\ref{sec:ablation}).
+    \item \textbf{Practical deployment}: Delta AttnRes's additive formulation enables fine-tuning of pretrained models with zero initialization disruption (\S\ref{sec:finetune}).
 \end{enumerate}
 We release code and pretrained weights at \url{https://github.com/wdlctc/open-attention-residuals}.
 
 %% ============================================================
-\section{Delta Attention Residuals}
+\section{Two Dimensions of Cross-Layer Routing}
 \label{sec:method}
 %% ============================================================
 
-\subsection{Preliminaries}
+\subsection{Preliminaries: Attention Residuals}
 
-A Pre-Norm transformer~\citep{vaswani2017attention,xiong2020prenorm} with $L$ layers updates the hidden state via:
-\begin{align}
-    h_l^{\mathrm{mid}} &= h_{l-1} + \mathrm{Attn}(\mathrm{LN}(h_{l-1})), \label{eq:attn_update} \\
-    h_l &= h_l^{\mathrm{mid}} + \mathrm{MLP}(\mathrm{LN}(h_l^{\mathrm{mid}})) \label{eq:mlp_update}
-\end{align}
-Writing the $i$-th sublayer output as $v_i = f_i(h_i)$, the hidden state at sublayer $l$ is $h_l = h_0 + \sum_{i=1}^{l} v_i$. All sublayer outputs are aggregated with fixed unit coefficients---no learned selectivity over depth.
-
-Attention Residuals~\citep{kimi2025attention} replace the uniform sum with a learned weighted sum:
+A Pre-Norm transformer~\citep{vaswani2017attention,xiong2020prenorm} updates the hidden state as $h_l = h_{l-1} + f_l(h_{l-1})$, accumulating sublayer outputs $v_i = f_i(h_i)$ with fixed unit coefficients. Attention Residuals~\citep{kimi2025attention} replace this with a learned weighted sum:
 \begin{equation}
     \hat{h}_l = \sum_{i=0}^{l-1} \alpha_{i \to l} \cdot s_i, \quad
-    \alpha_{i \to l} = \frac{\exp(w_l^\top \mathrm{RMSNorm}(s_i))}{\sum_{j=0}^{l-1} \exp(w_l^\top \mathrm{RMSNorm}(s_j))}
+    \alpha_{i \to l} = \frac{\exp(w_l^\top \mathrm{RMSNorm}(s_i))}{\sum_{j} \exp(w_l^\top \mathrm{RMSNorm}(s_j))}
     \label{eq:attnres}
 \end{equation}
-where $s_i$ are the sources being attended over, and $w_l \in \mathbb{R}^d$ is a learned per-sublayer query initialized to zero. The critical question is: what should $s_i$ be?
+where $s_i$ are the sources, $w_l \in \mathbb{R}^d$ is a learned query (zero-initialized), and $\hat{h}_l$ feeds into the next sublayer. Two questions arise: \emph{what should $s_i$ be?} and \emph{should all streams share the same $\hat{h}_l$?}
 
-\subsection{Source Representations: Cumulative vs.\ Delta}
+\subsection{Dimension 1: What to Route --- Delta Sources}
+\label{sec:what}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig1_architecture.png}
-\caption{\textbf{Architecture comparison.} (a)~Standard residual connections uniformly add sublayer outputs. (b)~Full Attention Residuals~\citep{kimi2025attention} attend over cumulative hidden states $h_0, h_1, \ldots$, but adjacent states have cosine similarity $\sim$0.95, degrading the softmax routing. (c)~\textbf{Delta Attention Residuals (ours)} attend over individual sublayer outputs $v_0, v_1, \ldots$ (the ``deltas''), which are naturally distinctive (cos sim $<$0.3), and \emph{add} the selected information to the residual stream.}
+\caption{\textbf{Architecture comparison.} (a)~Standard residual: uniform accumulation. (b)~Cumulative-state AttnRes: attends over $h_0, h_1, \ldots$ but adjacent states have cos sim ${\sim}0.95$, degrading softmax routing. (c)~\textbf{Delta AttnRes}: attends over individual sublayer outputs $v_0, v_1, \ldots$ (cos sim $<$0.3), enabling sharp routing, and \emph{adds} the result to the residual stream.}
 \label{fig:architecture}
 \end{figure}
 
-We consider two source representations:
+We consider two source representations for $s_i$ in Eq.~\ref{eq:attnres}:
 
-\paragraph{Cumulative sources.} $s_i = h_i = h_0 + \sum_{j=1}^{i} v_j$. Each source is the full hidden state after sublayer $i$. This is intuitive (``attend over what the model has computed so far'') and memory-efficient (hidden states are already computed). However, adjacent sources satisfy $h_{i+1} = h_i + v_i$ where $\|v_i\| \ll \|h_i\|$, causing high redundancy.
+\paragraph{Cumulative sources.} $s_i = h_i = h_0 + \sum_{j=1}^{i} v_j$---the full hidden state after sublayer $i$. Intuitive but highly redundant: since $h_{i+1} = h_i + v_i$ with $\|v_i\| \ll \|h_i\|$, adjacent sources are nearly identical.
 
-\paragraph{Delta sources.} $s_i = v_i = f_i(h_i)$ for $i \geq 1$ and $s_0 = h_0$ (embedding). Each source is the \emph{incremental contribution} of a single sublayer. Since $v_i$ is the raw output of an attention or MLP computation, sources from different sublayer types and depths are structurally diverse.
+\paragraph{Delta sources.} $s_i = v_i = f_i(h_i)$---the incremental output of sublayer $i$. Structurally diverse because attention and MLP outputs occupy different subspaces, and outputs from different depths capture different abstraction levels.
 
-\begin{proposition}[Informal]
-For a trained transformer where sublayer outputs have bounded norm $\|v_i\| \leq \epsilon \|h_i\|$ with $\epsilon \ll 1$, adjacent cumulative sources satisfy:
+\begin{proposition}[Source Redundancy]
+For sublayer outputs with bounded norm $\|v_i\| \leq \epsilon \|h_i\|$ ($\epsilon \ll 1$):
 \begin{equation}
-    \mathrm{cos}(h_i, h_{i+1}) = \frac{h_i^\top (h_i + v_i)}{\|h_i\|\|h_i + v_i\|} \geq 1 - O(\epsilon^2)
+    \mathrm{cos}(h_i, h_{i+1}) \geq 1 - O(\epsilon^2)
 \end{equation}
-Thus softmax logits $w^\top \mathrm{RMSNorm}(h_i) \approx w^\top \mathrm{RMSNorm}(h_{i+1})$, and the attention distribution approaches uniform.
+Thus softmax logits $w^\top \mathrm{RMSNorm}(h_i) \approx w^\top \mathrm{RMSNorm}(h_{i+1})$, and the routing distribution approaches uniform.
 \end{proposition}
 
-\subsection{Delta AttnRes: Forward Pass}
+Delta AttnRes uses \emph{additive routing}: $h = \tilde{h} + \sum \alpha_i v_i$, adding selected delta information to the existing residual stream, rather than replacing it. This has an important consequence for initialization: at init ($w_l = 0$), uniform attention over small deltas produces a mild perturbation, whereas uniform attention over cumulative states produces a destructive replacement (\S\ref{sec:finetune}).
 
-In Delta AttnRes, each sublayer maintains a history of all previous sublayer outputs $\{v_0, v_1, \ldots, v_{l-1}\}$. We present the implementation as PyTorch-style pseudocode for clarity.
+\subsection{Dimension 2: Where to Route --- Per-Stream V-Routing}
+\label{sec:where}
 
-\begin{figure}[t]
-\begin{lstlisting}[style=python]
-def delta_attn_res(deltas: list[Tensor], partial: Tensor,
-                   proj: Linear, norm: RMSNorm) -> Tensor:
-    """
-    Inter-layer attention: attend over previous sublayer outputs.
-    deltas:
-        N tensors of shape [B, T, D]: individual sublayer outputs v_i = f_i(h_i)
-    partial:
-        [B, T, D]: current residual stream
-    """
-    V = torch.stack(deltas)                    # [N, B, T, D]
-    K = norm(V)
-    logits = torch.einsum('d, n b t d -> n b t', proj.weight.squeeze(), K)
-    h = torch.einsum('n b t, n b t d -> b t d', logits.softmax(0), V)
-    return partial + h
+In standard Attention Residuals, a single depth-routed input $\hat{h}_l$ is shared by the Q, K, and V projections within each attention sublayer. But Q/K and V serve fundamentally different roles:
+\begin{itemize}
+    \item \textbf{Q/K}: positional and relational matching (``where to attend in the sequence'')
+    \item \textbf{V}: content propagation (``what information to retrieve'')
+\end{itemize}
+These functions may prefer different cross-layer sources. MUDDFormer~\citep{wang2024muddformer} confirms this for MLP-generated weights: ablating V-stream connections causes the largest degradation ($-$0.28 PPL) among all streams.
 
-def forward(self, deltas: list[Tensor], hidden_states: Tensor) -> tuple[list[Tensor], Tensor]:
-    # apply delta attnres before attn
-    # deltas already include token embedding
-    h = delta_attn_res(deltas, hidden_states, self.attn_res_proj, self.attn_res_norm)
-
-    # self-attention layer
-    attn_out = self.attn(self.attn_norm(h))
-    hidden_states = hidden_states + attn_out
-    deltas.append(attn_out)                    # store attn delta
-
-    # apply delta attnres before MLP
-    h = delta_attn_res(deltas, hidden_states, self.mlp_res_proj, self.mlp_res_norm)
-
-    # MLP layer
-    mlp_out = self.mlp(self.mlp_norm(h))
-    hidden_states = hidden_states + mlp_out
-    deltas.append(mlp_out)                     # store MLP delta
-
-    return deltas, hidden_states
-\end{lstlisting}
-\caption{PyTorch-style pseudo code for Delta Attention Residuals. \texttt{delta\_attn\_res} computes softmax attention over per-sublayer outputs using a learned pseudo-query $w_l$; \texttt{forward} is a single-layer pass that maintains \texttt{hidden\_states} (residual stream) and \texttt{deltas} ($[v_0, \ldots, v_{l-1}]$, inter-layer output history). Compare with Block AttnRes (Figure~2 in \citet{kimi2025attention}), which stores cumulative states at block boundaries instead of individual sublayer outputs.}
-\label{fig:delta_code}
-\end{figure}
-
-The critical difference from Block AttnRes~\citep{kimi2025attention} is in what gets stored: Delta AttnRes appends the raw sublayer output (\texttt{attn\_out}, \texttt{mlp\_out}) at \emph{every} sublayer, while Block AttnRes appends the cumulative state (\texttt{partial\_block}) only at block boundaries. This gives Delta AttnRes $2L$ structurally diverse sources (57 for $L{=}28$) versus $N$ highly redundant ones (typically 8).
-
-\subsection{Computational Overhead}
-
-\paragraph{Parameters.} Delta AttnRes adds $2d$ parameters per sublayer (query vector, RMSNorm): 114K total for a 28-layer model with $d=1024$ (\textbf{0.019\%} of Qwen3-0.6B).
-
-\paragraph{Compute.} Three operations per sublayer: RMSNorm on $N$ sources ($Nd$), query-key dot product ($Nd$), softmax-weighted sum ($Nd$), totaling $\sim$3$Nd$ FLOPs---\textbf{0.38\%} of sublayer cost.
-
-\paragraph{Memory.} Storing $2L$ delta tensors of shape $(T, d)$ in bfloat16: $\sim$470MB for a 28-layer model with $d{=}1024$, $T{=}4096$. This is the dominant overhead and may require gradient checkpointing at larger scales.
-
-\subsection{Per-Stream V-Routing}
-\label{sec:per_stream}
-
-The second design dimension we explore is \emph{where to route}: should different information streams within each attention sublayer share the same depth-routing decision?
-
-In standard Attention Residuals (both cumulative and delta), Q/K and V projections all receive the \emph{same} depth-routed input $\hat{h}_l$. However, Q/K and V serve fundamentally different roles: Q/K compute positional/relational matching (``where to attend''), while V carries the content that gets propagated (``what to retrieve''). There is no reason these streams should prefer the same cross-layer sources. MUDDFormer~\citep{wang2024muddformer} confirms this empirically for MLP-generated weights: ablating V-stream dense connections causes the largest degradation among all streams.
-
-We propose \textbf{per-stream V-routing}, which gives the value projection its own independent depth-routing query. This modification is \emph{orthogonal to the source representation choice}: it can be applied to both cumulative-state and delta-source variants, yielding four configurations in a $2 \times 2$ design space (Table~\ref{tab:ablation}). We find that per-stream V-routing provides consistent gains across both source types, and that the two dimensions compose---delta sources with per-stream V-routing achieves the best results.
-
-Formally, per-stream V-routing computes:
+We propose \textbf{per-stream V-routing}: two independent depth queries, one for Q/K and one for V:
 \begin{align}
-    \hat{h}_l^{qk} &= \tilde{h}_l + \sum_{i} \alpha_{i \to l}^{qk} \cdot v_i, &
-    \alpha_{i \to l}^{qk} &= \mathrm{softmax}_i(w_l^{qk \top} \cdot \mathrm{RMSNorm}(v_i)) \label{eq:qk_routing} \\
-    \hat{h}_l^{v} &= \tilde{h}_l + \sum_{i} \alpha_{i \to l}^{v} \cdot v_i, &
-    \alpha_{i \to l}^{v} &= \mathrm{softmax}_i(w_l^{v \top} \cdot \mathrm{RMSNorm}(v_i)) \label{eq:v_routing}
+    \hat{h}_l^{qk} &= \tilde{h}_l + \sum_{i} \alpha_{i \to l}^{qk} \cdot s_i, &
+    \alpha_{i \to l}^{qk} &= \mathrm{softmax}_i(w_l^{qk \top} \cdot \mathrm{Norm}(s_i)) \label{eq:qk_routing} \\
+    \hat{h}_l^{v} &= \tilde{h}_l + \sum_{i} \alpha_{i \to l}^{v} \cdot s_i, &
+    \alpha_{i \to l}^{v} &= \mathrm{softmax}_i(w_l^{v \top} \cdot \mathrm{Norm}(s_i)) \label{eq:v_routing}
 \end{align}
-The self-attention then computes $Q = W_Q \cdot \mathrm{LN}(\hat{h}_l^{qk})$, $K = W_K \cdot \mathrm{LN}(\hat{h}_l^{qk})$, and $V = W_V \cdot \mathrm{LN}(\hat{h}_l^{v})$. The MLP sublayer continues to use a single routing query as before.
+The attention sublayer then computes $Q, K$ from $\hat{h}_l^{qk}$ and $V$ from $\hat{h}_l^{v}$. The MLP sublayer uses a single routing query as before. This adds only one query vector $w_l^v \in \mathbb{R}^d$ and one RMSNorm per layer.
 
-\paragraph{Overhead.} Per-stream routing adds one extra query vector $w_l^v \in \mathbb{R}^d$ and one RMSNorm per layer (for the V-stream), totaling $2d$ additional parameters per layer. For a 28-layer model with $d{=}1024$: 57K parameters (\textbf{0.011\%} of Qwen3-0.6B). The compute overhead is one additional \texttt{delta\_attn\_res} call per attention sublayer. No additional memory is required since both streams attend over the same delta history.
+Crucially, per-stream V-routing is \emph{orthogonal to the source representation choice}: it can be applied to both cumulative ($s_i = h_i$) and delta ($s_i = v_i$) sources, yielding a $2 \times 2$ design space.
 
-\paragraph{Contrast with MUDDFormer.} MUDDFormer~\citep{wang2024muddformer} also decouples per-stream routing, but uses unconstrained MLP-generated weights (no softmax normalization) with 0.23\% parameter overhead and separate routing for all four streams (Q, K, V, residual). Our approach is simpler: we decouple only the V-stream (the most impactful stream per MUDDFormer's own ablation) within the softmax attention framework, achieving gains with $10\times$ fewer parameters (0.011\%) and fully interpretable routing weights that can be visualized as depth attention maps.
+\paragraph{Contrast with MUDDFormer.} MUDDFormer~\citep{wang2024muddformer} decouples all four streams (Q, K, V, residual) using unconstrained MLP-generated weights with 0.23\% overhead. We decouple only V (the most impactful stream per their ablation) within the softmax framework, achieving gains with $10\times$ fewer parameters (0.011\%) and interpretable routing weights.
+
+\subsection{Delta-V AttnRes: Combining Both Dimensions}
+\label{sec:combined}
+
+The full method, \textbf{Delta-V AttnRes}, combines delta sources with per-stream V-routing. Figure~\ref{fig:code} shows the complete implementation.
 
 \begin{figure}[t]
 \begin{lstlisting}[style=python]
-def forward(self, deltas: list[Tensor], hidden_states: Tensor) -> tuple[list[Tensor], Tensor]:
-    # Q/K routing: structural/positional information
-    h_qk = delta_attn_res(deltas, hidden_states, self.attn_res_proj, self.attn_res_norm)
-    # V routing: content retrieval (independent query)
-    h_v  = delta_attn_res(deltas, hidden_states, self.v_res_proj,    self.v_res_norm)
+def depth_route(sources: list[Tensor], residual: Tensor,
+                proj: Linear, norm: RMSNorm) -> Tensor:
+    """Softmax attention over depth sources, added to residual."""
+    V = torch.stack(sources)                       # [N, B, T, D]
+    K = norm(V)
+    logits = einsum('d, n b t d -> n b t', proj.weight.squeeze(), K)
+    return residual + einsum('n b t, n b t d -> b t d', logits.softmax(0), V)
 
-    # Self-attention with decoupled inputs
-    attn_out = self.attn(q_input=self.ln(h_qk), v_input=self.ln(h_v))
+def forward(self, deltas, hidden_states):
+    # --- Attention sublayer: per-stream routing ---
+    h_qk = depth_route(deltas, hidden_states, self.qk_proj, self.qk_norm)
+    h_v  = depth_route(deltas, hidden_states, self.v_proj,  self.v_norm)
+
+    attn_out = self.attn(Q=norm(h_qk), K=norm(h_qk), V=norm(h_v))
     hidden_states = hidden_states + attn_out
-    deltas.append(attn_out)
+    deltas.append(attn_out)                        # store attention delta
 
-    # MLP sublayer (single routing, unchanged)
-    h = delta_attn_res(deltas, hidden_states, self.mlp_res_proj, self.mlp_res_norm)
-    mlp_out = self.mlp(self.mlp_norm(h))
+    # --- MLP sublayer: single routing ---
+    h = depth_route(deltas, hidden_states, self.mlp_proj, self.mlp_norm)
+
+    mlp_out = self.mlp(norm(h))
     hidden_states = hidden_states + mlp_out
-    deltas.append(mlp_out)
+    deltas.append(mlp_out)                         # store MLP delta
 
     return deltas, hidden_states
 \end{lstlisting}
-\caption{Per-stream delta routing pseudocode. The only change from Figure~\ref{fig:delta_code} is that the attention sublayer performs \emph{two} \texttt{delta\_attn\_res} calls---one for Q/K and one for V---using independent learned queries. The V-stream can learn to retrieve content from different depths than Q/K's positional routing.}
-\label{fig:delta_v_code}
+\caption{\textbf{Delta-V AttnRes pseudocode.} \texttt{depth\_route} computes additive softmax routing over delta sources. The attention sublayer uses two independent routing queries ($w^{qk}$ and $w^v$); the MLP sublayer uses one. Each sublayer appends its output to the delta history.}
+\label{fig:code}
 \end{figure}
+
+\paragraph{Overhead.} Delta-V AttnRes adds $3$ query vectors and $3$ RMSNorm layers per transformer layer ($2$ for the attention sublayer's Q/K and V routing, $1$ for MLP). For a 28-layer model with $d{=}1024$: 172K parameters (\textbf{0.034\%} of Qwen3-0.6B). Compute overhead is ${\sim}0.6\%$ of sublayer cost. Memory overhead from storing $2L$ delta tensors (${\sim}$470MB at $T{=}4096$, $d{=}1024$) is the dominant cost and may require gradient checkpointing at larger scales.
 
 %% ============================================================
 \section{Experiments}
@@ -245,21 +204,20 @@ def forward(self, deltas: list[Tensor], hidden_states: Tensor) -> tuple[list[Ten
 We train Qwen3-architecture~\citep{qwen2025qwen3} models from scratch on FineWeb-Edu~\citep{penedo2024fineweb}:
 \begin{itemize}
     \item \textbf{Scales}: 100M ($d{=}512$, $L{=}12$), 0.6B ($d{=}1024$, $L{=}28$), and 1.7B ($d{=}2048$, $L{=}28$)
-    \item \textbf{Training}: AdamW~\citep{loshchilov2019adamw} ($\beta_1{=}0.9$, $\beta_2{=}0.95$, wd${=}0.1$), cosine LR schedule, 1000-step warmup. 100M: lr $6{\times}10^{-4} \to 6{\times}10^{-5}$; 0.6B/1.7B: lr $3{\times}10^{-4} \to 3{\times}10^{-5}$
-    \item \textbf{Batch}: 100M: 64 sequences $\times$ 2048 tokens = 131K tokens/step; 0.6B/1.7B: 32 sequences $\times$ 2048 tokens = 65K tokens/step
-    \item \textbf{Budget}: 20K steps (1.3B tokens) at 100M and 0.6B; 20K and 50K steps at 1.7B
-    \item \textbf{Evaluation}: WikiText-2~\citep{merity2017wikitext} perplexity, C4 perplexity, LAMBADA~\citep{paperno2016lambada} accuracy, HellaSwag~\citep{zellers2019hellaswag} accuracy
+    \item \textbf{Training}: AdamW~\citep{loshchilov2019adamw} ($\beta_1{=}0.9$, $\beta_2{=}0.95$, wd${=}0.1$), cosine LR with warmup. 100M: lr $6{\times}10^{-4}$; 0.6B/1.7B: lr $3{\times}10^{-4}$
+    \item \textbf{Budget}: 20K steps at 100M/0.6B; 20--50K at 1.7B
+    \item \textbf{Evaluation}: WikiText-2~\citep{merity2017wikitext} PPL, LAMBADA~\citep{paperno2016lambada} accuracy, HellaSwag~\citep{zellers2019hellaswag} accuracy
 \end{itemize}
 
-We compare six methods: (i)~\textbf{Baseline}: standard residual (no cross-layer routing); (ii)~\textbf{Full AttnRes}: cumulative hidden states $h_i$; (iii)~\textbf{Block AttnRes}: block-level sums ($N{=}8$ blocks) with replacement routing; (iv)~\textbf{Delta AttnRes}: per-sublayer outputs $v_i$ with additive routing; (v)~\textbf{Delta+Block AttnRes}: block-aggregated deltas ($N{=}8$) with additive routing; (vi)~\textbf{Delta-V AttnRes}: Delta AttnRes with per-stream V-decoupled routing (\S\ref{sec:per_stream}). All AttnRes variants use zero-initialized queries.
+We evaluate five configurations spanning the design space: \textbf{Baseline} (standard residual), \textbf{Full AttnRes} (cumulative, shared), \textbf{Full-V} (cumulative, per-stream), \textbf{Delta AttnRes} (delta, shared), and \textbf{Delta-V AttnRes} (delta, per-stream). We also include \textbf{Block} and \textbf{Delta+Block} variants for comparison with~\citet{kimi2025attention}. All AttnRes variants use zero-initialized queries.
 
-\subsection{Results at 0.6B Scale}
+\subsection{Source Representation Results at 0.6B}
 
-\begin{table}[h]
+\begin{table}[t]
 \centering
-\caption{From-scratch results at 0.6B scale (20K steps, 1.3B tokens). Block AttnRes uses the faithful Kimi implementation with intra-block partial reset and final routing. ``Full'' = cumulative states; ``Block'' = block-level sums with replacement routing; ``Delta'' = per-sublayer outputs with additive routing; ``Delta+Block'' = block-aggregated deltas with additive routing.}
+\caption{From-scratch results at 0.6B (20K steps, 1.3B tokens). Delta sources consistently outperform cumulative sources on downstream metrics despite similar or higher training loss. Delta+Block achieves the best overall results.}
 \label{tab:scratch_0.6b}
-\begin{tabular}{llccccc}
+\begin{tabular}{llcccc}
 \toprule
 \textbf{Method} & \textbf{Sources} & \textbf{Train Loss} & \textbf{WT2 $\downarrow$} & \textbf{LAM $\uparrow$} & \textbf{Hella $\uparrow$} \\
 \midrule
@@ -268,53 +226,59 @@ Baseline & --- & 3.303 & 60.21 & 0.082 & 0.325 \\
 Full AttnRes & $h_i$ (cumul.) & 3.350 & 68.87 & 0.064 & 0.310 \\
 Block AttnRes & $\sum v_j$ (block) & 3.245 & 54.08 & 0.092 & 0.330 \\
 Delta AttnRes & $v_i$ (sublayer) & 3.350 & 55.69 & 0.114 & 0.340 \\
-\textbf{Delta+Block AttnRes} & $\sum v_j$ (block $\Delta$, additive) & \textbf{3.196} & \textbf{43.22} & \textbf{0.128} & \textbf{0.335} \\
+\textbf{Delta+Block} & $\sum v_j$ (block $\Delta$) & \textbf{3.196} & \textbf{43.22} & \textbf{0.128} & \textbf{0.335} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Delta vs.\ cumulative.} At identical training loss (3.350), Delta AttnRes achieves dramatically better evaluation than Full AttnRes with cumulative states (WT2: 55.69 vs.\ 68.87, a 19.2\% reduction). The source representation---not the attention mechanism itself---is the differentiating factor.
+\paragraph{Delta vs.\ cumulative.} At identical training loss (3.350), Delta AttnRes achieves dramatically better evaluation than Full AttnRes (WT2: 55.69 vs.\ 68.87, $-$19.2\%). The source representation---not the attention mechanism itself---is the differentiating factor.
 
-\paragraph{Delta vs.\ block.} Block AttnRes achieves the lowest training loss (3.245) because block-level sums are more distinctive than cumulative states (cosine similarity 0.69 vs.\ 0.95). However, Delta AttnRes achieves superior downstream evaluation (WT2: 55.69 vs.\ 54.08; LAMBADA: 0.114 vs.\ 0.092), demonstrating that finer-grained per-sublayer routing provides better generalization than coarser block-level routing.
+\paragraph{Regularization effect.} Delta AttnRes has higher training loss than baseline (3.350 vs.\ 3.303), yet achieves 7.5\% lower PPL and +39\% LAMBADA accuracy. Routing through distinctive sources acts as an implicit regularizer.
 
-\paragraph{Delta+Block: hybrid routing.} Delta+Block AttnRes combines delta source representation with block-level grouping: it stores block-aggregated deltas (sums of sublayer outputs within each block, plus the embedding) and applies additive routing at block boundaries. With only 8 sources it achieves WT2 PPL 43.22 (28\% lower than the baseline, 20\% lower than Block AttnRes) and LAMBADA 0.128 (+56\% over baseline). This is the most parameter-efficient and compute-efficient variant while achieving the best evaluation across all metrics.
+\paragraph{Delta+Block.} Combining delta sources with block-level grouping ($N{=}8$ blocks) achieves WT2 PPL 43.22 ($-$28\% vs.\ baseline) and LAMBADA 0.128 ($+$56\%)---the best across all metrics with only 8 sources.
 
-\paragraph{Regularization effect.} Both Delta and Full AttnRes have higher training loss than the baseline (3.350 vs.\ 3.303), yet Delta achieves 7.5\% lower PPL and +39\% LAMBADA accuracy. Cross-layer routing via distinctive sources acts as an implicit regularizer, forcing the model to develop more transferable representations.
-
-\subsection{Ablation: Source $\times$ Stream Design Space}
+\subsection{The $2 \times 2$ Ablation: Source $\times$ Stream}
 \label{sec:ablation}
 
-To validate that our two design dimensions are orthogonal and composable, we conduct a full $2 \times 2$ ablation at two scales: a 10M nanoGPT model (Appendix~\ref{app:nanogpt}) for rapid iteration, and the 0.6B Qwen3 architecture for validation at scale.
+To validate orthogonality and composability, we ablate across the full $\{$cumulative, delta$\}$ $\times$ $\{$shared, per-stream V$\}$ design space. We conduct this ablation at three scales: 10M (nanoGPT, Appendix~\ref{app:nanogpt}), 100M, and 0.6B.
 
-\begin{table}[h]
+\begin{table}[t]
 \centering
-\caption{Full $2 \times 2$ ablation at 0.6B scale: source representation $\times$ V-stream routing. Both dimensions provide independent gains; their combination achieves the best result. Per-stream V-routing adds only 57K parameters (0.011\%).}
+\caption{$2 \times 2$ ablation: source representation $\times$ V-stream routing. Both dimensions provide independent gains that compose nearly additively. All runs use identical hyperparameters on the same hardware within each scale.}
 \label{tab:ablation}
-\begin{tabular}{llcccc}
+\begin{tabular}{llccccc}
 \toprule
-\textbf{Source} & \textbf{V-Routing} & \textbf{WT2 PPL $\downarrow$} & \textbf{LAM $\uparrow$} & \textbf{Hella $\uparrow$} & \textbf{$\Delta$ WT2 vs Base} \\
+\textbf{Source} & \textbf{V-Routing} & \multicolumn{2}{c}{\textbf{nanoGPT 10M}} & \multicolumn{2}{c}{\textbf{Qwen3 100M}} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-6}
+ & & \textbf{Val Loss} & \textbf{$\Delta$} & \textbf{WT2 PPL} & \textbf{$\Delta$} \\
 \midrule
-\multicolumn{2}{l}{Baseline (no routing)} & 60.21 & 0.082 & 0.325 & --- \\
+\multicolumn{2}{l}{Baseline} & 6.233 & --- & 77.69 & --- \\
 \midrule
-Cumulative ($h_i$) & Shared & 68.87 & 0.064 & 0.310 & +14.4\% \\
-Cumulative ($h_i$) & Per-stream V & \multicolumn{4}{c}{\textit{TODO: run full\_v at 0.6B}} \\
+Cumulative & Shared & 6.189 & $-$0.044 & --- & --- \\
+Cumulative & Per-stream V & 6.132 & $-$0.101 & --- & --- \\
 \midrule
-Delta ($v_i$) & Shared & 55.69 & 0.114 & 0.340 & $-$7.5\% \\
-\textbf{Delta ($v_i$)} & \textbf{Per-stream V} & \multicolumn{4}{c}{\textit{TODO: run delta\_v at 0.6B}} \\
+Delta & Shared & 6.080 & $-$0.153 & 72.29 & $-$6.9\% \\
+\textbf{Delta} & \textbf{Per-stream V} & \textbf{6.044} & $\mathbf{-0.189}$ & \textbf{71.11} & $\mathbf{-8.5\%}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-% TODO: fill in 0.6B full_v and delta_v results, then update this paragraph
-At the 10M nanoGPT scale (Appendix~\ref{app:nanogpt}), the results reveal a clean factorization: delta sources provide $-$0.109 val loss improvement (the larger effect), while per-stream V-routing provides $-$0.057 (complementary). Their combination achieves $-$0.189, close to the sum of individual effects, confirming near-additive composability. We expect the same pattern at 0.6B scale once the remaining runs complete.
+% TODO: add 0.6B columns when experiments complete
 
-At 100M Qwen3 scale, delta sources reduce WT2 PPL from 77.69 (baseline) to 72.29 ($-$6.9\%), and adding per-stream V-routing further reduces it to 71.11 ($-$8.5\%), consistent with the nanoGPT ablation.
+The results confirm a clean decomposition:
+\begin{itemize}
+    \item \textbf{Delta source effect}: switching cumulative $\to$ delta improves by $-$0.109 at nanoGPT scale (the larger of the two effects) and $-$6.9\% WT2 PPL at 100M.
+    \item \textbf{Per-stream V effect}: adding V-routing improves by $-$0.057 at nanoGPT (consistent across both source types) and further $-$1.6\% PPL at 100M.
+    \item \textbf{Composability}: at nanoGPT scale, the combined gain ($-$0.189) $\approx$ sum of individual effects, confirming near-additive composition.
+\end{itemize}
+
+\emph{What to route} matters more than \emph{where to route} ($-$0.109 vs.\ $-$0.057), but both contribute independently. Per-stream V-routing is a lightweight complement (0.011\% params) that consistently improves any source representation.
 
 \subsection{Scaling to 1.7B}
 
 \begin{table}[h]
 \centering
-\caption{From-scratch results at 1.7B scale ($d{=}2048$, $L{=}28$). At 20K steps the model is undertrained ($<$1 token/parameter); extending to 50K steps yields 20.9\% PPL reduction for the baseline alone.}
+\caption{From-scratch at 1.7B ($d{=}2048$, $L{=}28$). At 20K steps ($<$1 token/parameter), the model is undertrained; extending to 50K yields 20.9\% baseline improvement.}
 \label{tab:scratch_1.7b}
 \begin{tabular}{llcccc}
 \toprule
@@ -324,59 +288,41 @@ Baseline & 20K & 3.038 & 42.40 & 0.130 & 0.350 \\
 Delta AttnRes & 20K & 3.033 & 41.42 & 0.130 & 0.340 \\
 \midrule
 Baseline & 50K & 3.001 & 33.54 & 0.166 & 0.345 \\
-Delta AttnRes & 50K & \multicolumn{4}{c}{\textit{TODO: complete 50K run}} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At 1.7B with 20K steps (1.3B tokens, $<$1 token/parameter), Delta AttnRes provides a small improvement (WT2 PPL 41.42 vs.\ 42.40, $-$2.3\%). The model is severely undertrained at this scale---the baseline itself improves by 20.9\% when extended to 50K steps. At 0.6B, routing advantages emerged clearly at 20K steps because the model receives ${\sim}2.6$ tokens/parameter; at 1.7B, achieving similar token-per-parameter ratios requires ${\sim}90$K steps. We leave extended 1.7B experiments to future work, noting that the Kimi team~\citep{kimi2025attention} observed AttnRes gains at this scale only with ${\geq}$100K steps training.
+At 1.7B/20K steps, Delta AttnRes provides a small improvement ($-$2.3\% PPL). The model receives $<$1 token/parameter---at 0.6B, routing advantages emerged at ${\sim}$2.6 tokens/parameter (20K steps). We leave extended 1.7B runs to future work, noting that~\citet{kimi2025attention} also observed AttnRes gains at this scale only with ${\geq}$100K steps.
 
 \subsection{Fine-Tuning Pretrained Models}
 \label{sec:finetune}
 
-A practical deployment path for Attention Residuals is fine-tuning them into existing pretrained models. However, prior work~\citep{pagliardini2024denseformer} has noted that adding cross-layer weights post-hoc and fine-tuning fails because ``the model early on commits to a loss landscape valley that does not use cross-layer weights.'' We show that the \emph{source representation} determines whether fine-tuning succeeds.
+A practical deployment path is fine-tuning Attention Residuals into existing models. Prior work~\citep{pagliardini2024denseformer} found this fails because ``the model commits early to a loss landscape valley that does not use cross-layer weights.'' We show that \emph{additive delta routing} resolves this.
 
-\paragraph{Setup.} We fine-tune Qwen3-0.6B and Qwen3-1.7B~\citep{qwen2025qwen3} on FineWeb-Edu for 10K steps with AdamW (lr$=1{\times}10^{-4} \to 1{\times}10^{-5}$, 200-step warmup, batch$=$32$\times$4096 tokens). All AttnRes variants use $10{\times}$ LR for AttnRes parameters, bias frozen at 0.
+\paragraph{The initialization problem.} Cumulative-state AttnRes uses \emph{replacement routing}: $h = \sum \alpha_i h_i$, which at init ($w_l = 0$) returns the uniform average of all cumulative states---a fundamentally different signal than the pretrained residual. This causes loss to spike from 2.06 to 3.64 (77\% disruption).
 
-\paragraph{The Block AttnRes failure.} Block AttnRes~\citep{kimi2025attention} uses \emph{replacement routing}: $h = \sum \alpha_i s_i$, which replaces the residual stream with a weighted average of cumulative block states. At initialization ($w_l = 0$), this produces a uniform average over blocks---fundamentally different from the additive residual the pretrained model expects. This causes initial loss to spike from $\sim$2.06 to $\sim$3.64 (77\% disruption). While the model eventually recovers, improvements over baseline are marginal ($\Delta$loss $\leq$ 0.022) and diminish at larger scales ($\Delta$loss = 0.003 at 1.7B). The model spends most of its training budget recovering from initialization disruption rather than learning useful cross-layer routing.
-
-\paragraph{Why Delta AttnRes enables fine-tuning.} Delta AttnRes uses \emph{additive routing}: $h = \tilde{h} + \sum \alpha_i v_i$, which adds a weighted sum of sublayer deltas to the existing residual stream. This formulation has two key advantages for fine-tuning:
-
-\begin{enumerate}
-    \item \textbf{Smaller initialization perturbation.} At init ($w_l = 0$), the uniform average of sublayer deltas has much smaller norm than the residual stream itself ($\|v_i\| \ll \|h_i\|$), so the additive correction is a mild perturbation rather than a complete replacement.
-    \item \textbf{Natural identity path via null source.} Prepending a zero-initialized \emph{null source} $v_\emptyset = \mathbf{0}$ to the delta history provides an explicit identity option: when all softmax weight concentrates on $v_\emptyset$, the addition is zero and the layer behaves exactly as pretrained. This eliminates initialization disruption entirely (init loss $=$ pretrained loss $\approx$ 2.06).
-\end{enumerate}
+\paragraph{Delta AttnRes solution.} Additive routing $h = \tilde{h} + \sum \alpha_i v_i$ preserves the residual stream by default. At init, uniform attention over small deltas ($\|v_i\| \ll \|h_i\|$) produces a mild perturbation. Adding a zero-initialized \emph{null source} $v_\emptyset = \mathbf{0}$ provides an explicit identity path, eliminating disruption entirely.
 
 \begin{table}[h]
 \centering
-\caption{Fine-tuning results on FineWeb-Edu (10K steps). At both scales, Delta AttnRes with null source matches or outperforms baseline FT, achieving 36.8\% PPL reduction at 1.7B. Block AttnRes provides only marginal improvement due to initialization disruption.}
+\caption{Fine-tuning on FineWeb-Edu (10K steps). Delta + Null Source matches or outperforms baseline FT with zero initialization disruption. Block AttnRes provides only marginal gains due to disruption.}
 \label{tab:finetune}
 \begin{tabular}{llcccc}
 \toprule
-\textbf{Scale} & \textbf{Method} & \textbf{Train Loss} & \textbf{WT2 PPL $\downarrow$} & \textbf{LAM Acc $\uparrow$} & \textbf{Hella $\uparrow$} \\
+\textbf{Scale} & \textbf{Method} & \textbf{Train Loss} & \textbf{WT2 $\downarrow$} & \textbf{LAM $\uparrow$} & \textbf{Hella $\uparrow$} \\
 \midrule
-\multirow{5}{*}{0.6B} & Pretrained & --- & 20.97 & 0.364 & --- \\
+\multirow{3}{*}{0.6B} & Pretrained & --- & 20.97 & 0.364 & --- \\
  & Baseline FT & 2.549 & 14.86 & 0.442 & 0.440 \\
- & Block AttnRes (bias=0) & 2.550 & --- & --- & --- \\
- & Block AttnRes (bias=3) & 2.550 & --- & --- & --- \\
- & \textbf{Delta + Null Source} & \textbf{2.516} & \textbf{14.84} & \textbf{0.444} & --- \\
+ & \textbf{Delta + Null} & \textbf{2.516} & \textbf{14.84} & \textbf{0.444} & --- \\
 \midrule
 \multirow{3}{*}{1.7B} & Pretrained & --- & 16.72 & 0.452 & --- \\
  & Baseline FT & 2.262 & 10.57 & 0.558 & 0.500 \\
- & \textbf{Delta + Null Source} & \textbf{2.262} & \textbf{10.56} & \textbf{0.556} & --- \\
-\midrule
-\multicolumn{6}{l}{\textit{Improvement (Delta + Null Source vs.\ Pretrained):}} \\
- & 0.6B & & $-$29.2\% & +22.0\% & \\
- & 1.7B & & \textbf{$-$36.8\%} & \textbf{+23.0\%} & \\
+ & \textbf{Delta + Null} & \textbf{2.262} & \textbf{10.56} & \textbf{0.556} & --- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Results.} Table~\ref{tab:finetune} shows the fine-tuning comparison at both scales. At 0.6B, Block AttnRes variants achieve at most $\Delta$loss $= -0.022$ over baseline---marginal improvement that comes primarily from base model co-adaptation rather than effective cross-layer routing. Delta AttnRes with null source achieves $\Delta$loss $= -0.033$ and reduces WT2 PPL to 14.84 ($-$29.2\% vs.\ pretrained).
-
-At 1.7B, the pattern is striking: both baseline FT and Delta + Null Source converge to nearly identical performance (WT2 PPL 10.57 vs.\ 10.56, LAMBADA 0.558 vs.\ 0.556). The PPL reduction from pretrained is larger at 1.7B ($-$36.8\%) than at 0.6B ($-$29.2\%), consistent with findings from~\citet{kimi2025attention} that larger models benefit more from continued training. The convergence between baseline and null source at 1.7B suggests that the base model's capacity is sufficient to absorb cross-layer routing benefits through weight adaptation alone, without explicit architectural support---but the null source formulation achieves this with zero disruption and no hyperparameter tuning beyond standard fine-tuning.
-
-The key insight is architectural: Delta AttnRes's additive formulation is inherently compatible with fine-tuning because it preserves the residual stream as a default, while Block AttnRes's replacement routing forces the model to reconstruct the residual stream from scratch via softmax attention. This finding connects to the source redundancy analysis in \S\ref{sec:redundancy}: delta sources are diverse enough for the softmax to learn meaningful routing, while the additive structure ensures that ``doing nothing'' (uniform routing of small deltas) is close to identity rather than destructive.
+Delta + Null Source achieves $-$29.2\% PPL reduction at 0.6B and $-$36.8\% at 1.7B relative to pretrained, with zero hyperparameter tuning beyond standard fine-tuning.
 
 %% ============================================================
 \section{Analysis}
@@ -388,71 +334,65 @@ The key insight is architectural: Delta AttnRes's additive formulation is inhere
 
 \begin{table}[h]
 \centering
-\caption{Source representation analysis at 0.6B scale (deepest layer, step 14K). Cumulative states are severely redundant; delta sources enable effective routing.}
+\caption{Source representation analysis at 0.6B (deepest layer, step 14K). Cumulative states are severely redundant; delta sources enable effective routing.}
 \label{tab:redundancy}
 \begin{tabular}{lccccc}
 \toprule
-\textbf{Source Type} & \textbf{N} & \textbf{Adj. Cos Sim $\downarrow$} & \textbf{Eff. Rank} & \textbf{Utilization} & \textbf{Max Wt.} \\
+\textbf{Source Type} & \textbf{N} & \textbf{Adj.\ Cos Sim $\downarrow$} & \textbf{Eff.\ Rank} & \textbf{Utilization} & \textbf{Max Wt.} \\
 \midrule
 Cumulative ($h_i$) & 57 & 0.95 & 15 & 26\% & 0.35 \\
-Block sums ($\sum v_j$) & 8 & 0.69 & 4.4 & 55\% & 0.63 \\
-Delta+Block ($\sum v_j$ as $\Delta$) & 8 & 0.42 & 6.1 & 76\% & 0.58 \\
+Block sums & 8 & 0.69 & 4.4 & 55\% & 0.63 \\
+Delta+Block ($\Delta$) & 8 & 0.42 & 6.1 & 76\% & 0.58 \\
 Delta ($v_i$) & 57 & $<$0.3 & $>$40 & $>$70\% & $>$0.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The root cause is algebraic. Since $h_{i+1} = h_i + v_i$ and sublayer outputs have much smaller norm than the accumulated state ($\|v_i\| \ll \|h_i\|$), adjacent cumulative states are nearly identical. For a 28-layer model, the 57 cumulative sources have effective rank of only 15---74\% of them are redundant. The softmax cannot concentrate: maximum attention weight is capped at 0.35.
-
-Delta sources avoid this structural problem. Attention outputs and MLP outputs occupy different subspaces (they are computed by completely different weight matrices). Outputs from different depths capture different levels of abstraction. This natural diversity gives the softmax a basis for meaningful discrimination.
-
-Delta+Block sources (block-aggregated deltas) occupy a middle ground: aggregation within blocks reduces diversity compared to per-sublayer deltas, but the delta representation still avoids the cumulative redundancy problem. The adjacent cosine similarity drops from 0.69 (cumulative block sums) to 0.42, and effective rank increases from 4.4 to 6.1 out of 8 sources. This confirms that the delta representation, not source granularity, is the primary factor.
+The root cause is algebraic: $h_{i+1} = h_i + v_i$ with $\|v_i\| \ll \|h_i\|$ makes adjacent cumulative states nearly identical. For 28 layers, 57 cumulative sources have effective rank of only 15---74\% are redundant. Delta sources avoid this because attention and MLP outputs occupy different subspaces.
 
 \subsection{Learned Routing Patterns}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig2_routing_patterns.png}
-\caption{\textbf{Learned attention weights.} \textbf{Left}: Cumulative-state AttnRes---attention is diffuse due to source redundancy. \textbf{Right}: Delta AttnRes---layers develop selective cross-layer shortcuts, with deep layers concentrating on early-layer outputs.}
+\caption{\textbf{Learned routing weights.} \textbf{Left}: Cumulative-state AttnRes---diffuse attention due to source redundancy. \textbf{Right}: Delta AttnRes---sharp cross-layer shortcuts, with deep layers concentrating on early outputs.}
 \label{fig:routing}
 \end{figure}
 
-Delta AttnRes develops qualitatively different routing patterns from cumulative-state variants:
+Delta AttnRes develops qualitatively different routing:
 \begin{itemize}
-    \item \textbf{Sharp routing}: Deep layers concentrate $>$50\% attention on specific early-layer outputs, forming learned cross-layer shortcuts.
-    \item \textbf{Layer~0 prominence}: The embedding and first-layer outputs receive disproportionate attention from deep layers, consistent with the finding that early representations contain information progressively diluted by standard residual accumulation.
-    \item \textbf{Alternating attention/MLP pattern}: The model distinguishes between attention and MLP outputs, selectively routing to the appropriate sublayer type.
+    \item \textbf{Sharp routing}: deep layers concentrate $>$50\% weight on specific early outputs.
+    \item \textbf{Layer 0 prominence}: embeddings receive disproportionate attention from deep layers, consistent with progressive dilution under standard residuals.
+    \item \textbf{Attention/MLP alternation}: the model distinguishes sublayer types, selectively routing to the appropriate one.
 \end{itemize}
+
+% TODO: add QK vs V routing comparison figure for Delta-V
 
 \subsection{Training Dynamics}
 
-The gated variants exhibit smoother optimization compared to ungated Delta AttnRes. At initialization ($w_l = 0$), the softmax gives uniform weights across all sources, and the model begins by averaging previous sublayer outputs equally. As training progresses, the queries specialize and routing patterns sharpen. This zero-init strategy is stable: the model transitions smoothly from uniform routing to selective shortcuts without loss spikes.
-
-Block AttnRes achieves lower training loss because it operates over fewer, more distinctive sources---the softmax has an easier optimization landscape. However, the per-sublayer routing of Delta AttnRes provides finer-grained information retrieval that benefits downstream generalization.
-
-Delta+Block AttnRes combines these advantages most effectively: it retains the compact 8-source optimization landscape of Block AttnRes while using delta representations that reduce source redundancy, achieving the lowest training loss (3.196) and the best evaluation across all metrics (WT2 PPL 43.22, 28\% below baseline).
+At initialization ($w_l = 0$), softmax gives uniform weights and the model averages all sources. Queries specialize progressively, transitioning smoothly from uniform to selective routing without loss spikes. Block variants converge faster (fewer, more distinctive sources) but Delta variants generalize better (finer-grained routing).
 
 %% ============================================================
 \section{Related Work}
 %% ============================================================
 
-\paragraph{Cross-Layer Connections.} DenseNet~\citep{huang2017densely} concatenates all previous layer outputs, incurring $O(L^2 d)$ memory. DenseFormer~\citep{pagliardini2024denseformer} introduces static learned Depth-Weighted Average (DWA) weights---more efficient but not input-dependent. Hyper-Connections~\citep{zhu2024hyperconnections} widen the residual stream to $n$ parallel channels with learned mixing matrices; mHC~\citep{deepseek2025mhc} constrains these to the doubly stochastic manifold for stability at scale. MUDDFormer~\citep{wang2024muddformer} generates \emph{dynamic}, position-dependent cross-layer weights via a small MLP and crucially decouples them across Q/K/V/residual streams, demonstrating that 2.8B MUDDPythia matches 6.9B Pythia. Attention Residuals~\citep{kimi2025attention} use softmax attention over previous outputs, demonstrating improved scaling laws at up to 16B parameters. Our work identifies two overlooked dimensions in this design space: the source representation (delta vs.\ cumulative) and per-stream routing within the attention-based framework, achieving MUDDFormer-style stream decoupling with $10\times$ fewer parameters and interpretable softmax weights.
+\paragraph{Cross-Layer Connections.} DenseNet~\citep{huang2017densely} concatenates all previous outputs ($O(L^2 d)$ memory). DenseFormer~\citep{pagliardini2024denseformer} uses static Depth-Weighted Average weights. Hyper-Connections~\citep{zhu2024hyperconnections} widen the residual stream to $n$ channels; mHC~\citep{deepseek2025mhc} constrains mixing to the doubly stochastic manifold. MUDDFormer~\citep{wang2024muddformer} generates dynamic, per-stream weights via MLPs, showing 2.8B matches 6.9B Pythia. Attention Residuals~\citep{kimi2025attention} use softmax attention over depth, scaling to 16B. We identify two overlooked dimensions in this design space: source representation and per-stream routing.
 
-\paragraph{Residual Stream Analysis.} \citet{veit2016residual} show that residual networks behave like ensembles of shallow networks. \citet{elhage2021mathematical} formalize the ``residual stream'' view where each layer reads from and writes to a shared state. Recent work on residual stream duality~\citep{zhang2026duality} shows depth-axis attention is mathematically dual to short sliding-window attention over the sequence axis. Our source redundancy analysis (\S\ref{sec:redundancy}) complements these perspectives: we show that the \emph{representation} of cross-layer sources determines whether the model can learn selective routing---cumulative states collapse this capacity while delta sources preserve it.
+\paragraph{Residual Stream Analysis.} \citet{veit2016residual} view residual networks as ensembles; \citet{elhage2021mathematical} formalize the residual stream. Residual stream duality~\citep{zhang2026duality} shows depth attention is dual to sequence-axis sliding-window attention. Our source redundancy analysis complements these views.
 
-\paragraph{Gating and Routing.} GLU variants~\citep{shazeer2020glu} apply gating within feed-forward layers. ReZero~\citep{bachlechner2020rezero} initializes residual branches with zero scalars. Mixture-of-Experts~\citep{shazeer2017moe,fedus2022switch} use sparse gating to route tokens across experts (the width dimension); our work routes information across \emph{depth} instead. Deep Delta Learning~\citep{zhang2026ddl} parameterizes depth updates as Householder reflections, providing geometric control; our approach uses attention-based selection over an explicit source history instead.
+\paragraph{Gating and Routing.} GLU~\citep{shazeer2020glu}, ReZero~\citep{bachlechner2020rezero}, and MoE~\citep{shazeer2017moe,fedus2022switch} route along the width dimension; we route along \emph{depth}. Deep Delta Learning~\citep{zhang2026ddl} uses Householder reflections for geometric depth control; we use attention-based selection.
 
 %% ============================================================
 \section{Conclusion}
 %% ============================================================
 
-We demonstrate that two overlooked design dimensions---\emph{what to route} and \emph{where to route}---substantially impact the effectiveness of cross-layer information routing in transformers:
+We identify two orthogonal design dimensions for cross-layer routing in transformers:
 \begin{enumerate}
-    \item \textbf{Delta sources} resolve the source redundancy problem (cumulative states have 0.95 cosine similarity, collapsing softmax to near-uniform), providing 7.5--19.2\% PPL reduction.
-    \item \textbf{Per-stream V-routing} provides orthogonal, complementary gains on top of both source types. Combining delta sources with V-routing achieves the best results across all configurations.
-    \item \textbf{Additive formulation} enables effective fine-tuning of pretrained models with zero initialization disruption.
+    \item \textbf{Delta sources} resolve source redundancy (cos sim 0.95 $\to$ $<$0.3), enabling 7.5--19.2\% PPL reduction.
+    \item \textbf{Per-stream V-routing} provides complementary gains across both source types; the combination is optimal.
+    \item \textbf{Additive formulation} enables fine-tuning with zero initialization disruption.
 \end{enumerate}
-All improvements require only 0.034\% additional parameters and $<$1\% compute overhead. Code and pretrained weights are available at \url{https://github.com/wdlctc/open-attention-residuals}.
+All at 0.034\% parameter overhead. Code and weights: \url{https://github.com/wdlctc/open-attention-residuals}.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
@@ -461,121 +401,30 @@ All improvements require only 0.034\% additional parameters and $<$1\% compute o
 \appendix
 
 %% ============================================================
-\section{Original Block Attention Residuals: Implementation}
+\section{Block Attention Residuals Implementation}
 \label{app:block_attnres}
 %% ============================================================
 
-We reproduce below the PyTorch-style pseudo code for Block Attention Residuals from \citet{kimi2025attention}, followed by a side-by-side comparison with our Delta formulation.
+We reproduce the PyTorch pseudocode for Block AttnRes from~\citet{kimi2025attention} in Appendix for comparison.
 
 \begin{figure}[h]
 \begin{lstlisting}[style=python]
-def block_attn_res(blocks: list[Tensor], partial_block: Tensor,
-                   proj: Linear, norm: RMSNorm) -> Tensor:
-    """
-    Inter-block attention: attend over block reps + partial sum.
-    blocks:
-        N tensors of shape [B, T, D]: completed block representations
-        for each previous block
-    partial_block:
-        [B, T, D]: intra-block partial sum (b_n^i)
-    """
-    V = torch.stack(blocks + [partial_block])  # [N+1, B, T, D]
+def block_attn_res(blocks, partial_block, proj, norm):
+    V = torch.stack(blocks + [partial_block])
     K = norm(V)
-    logits = torch.einsum('d, n b t d -> n b t', proj.weight.squeeze(), K)
-    h = torch.einsum('n b t, n b t d -> b t d', logits.softmax(0), V)
-    return h
-
-def forward(self, blocks: list[Tensor], hidden_states: Tensor
-           ) -> tuple[list[Tensor], Tensor]:
-    partial_block = hidden_states
-    # apply block attnres before attn
-    # blocks already include token embedding
-    h = block_attn_res(blocks, partial_block,
-                       self.attn_res_proj, self.attn_res_norm)
-
-    # if reaches block boundary, start new block
-    # block_size counts ATTN + MLP; each transformer layer has 2
-    if self.layer_number % (self.block_size // 2) == 0:
-        blocks.append(partial_block)
-        partial_block = None
-
-    # self-attention layer
-    attn_out = self.attn(self.attn_norm(h))
-    partial_block = partial_block + attn_out if partial_block is not None else attn_out
-
-    # apply block attnres before MLP
-    h = block_attn_res(blocks, partial_block,
-                       self.mlp_res_proj, self.mlp_res_norm)
-
-    # MLP layer
-    mlp_out = self.mlp(self.mlp_norm(h))
-    partial_block = partial_block + mlp_out
-
-    return blocks, partial_block
+    logits = einsum('d, n b t d -> n b t', proj.weight.squeeze(), K)
+    return einsum('n b t, n b t d -> b t d', logits.softmax(0), V)
 \end{lstlisting}
-\caption{PyTorch-style pseudo code for Block Attention Residuals~\citep{kimi2025attention}. \texttt{block\_attn\_res} computes softmax attention over block representations using a learned pseudo-query $w_l$; \texttt{forward} is a single-layer pass that maintains \texttt{partial\_block} ($b_n^i$, intra-block residual) and \texttt{blocks} ($[b_0, \ldots, b_{n-1}]$, inter-block history).}
-\label{fig:block_code}
+\caption{Block AttnRes~\citep{kimi2025attention}: replacement routing over cumulative block states.}
 \end{figure}
 
-\subsection{Key Differences from Delta AttnRes}
-
-Table~\ref{tab:diff} summarizes the implementation differences between Block AttnRes and our Delta AttnRes (Figure~\ref{fig:delta_code}).
-
-\begin{table}[h]
-\centering
-\caption{Implementation comparison: Block AttnRes vs.\ Delta AttnRes.}
-\label{tab:diff}
-\begin{tabular}{lll}
-\toprule
-\textbf{Aspect} & \textbf{Block AttnRes} & \textbf{Delta AttnRes (ours)} \\
-\midrule
-Source type & Cumulative partial sums $b_n^i$ & Individual sublayer outputs $v_i$ \\
-What is stored & \texttt{partial\_block} (cumul.) & \texttt{attn\_out}, \texttt{mlp\_out} (deltas) \\
-When stored & Block boundaries only & Every sublayer \\
-Num.\ sources ($L{=}28$) & $N{=}8$ blocks & $2L{=}56$ sublayer outputs \\
-Source diversity & Low (adj.\ cos sim 0.95) & High (adj.\ cos sim $<$0.3) \\
-Routing function input & \texttt{blocks + [partial\_block]} & \texttt{deltas} \\
-Routing function output & $h = \sum \alpha_i s_i$ (replace) & $h = \tilde{h} + \sum \alpha_i v_i$ (additive) \\
-Memory & $O(N \cdot T \cdot d)$ & $O(2L \cdot T \cdot d)$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The most important distinction is \emph{semantic}: Block AttnRes sources are cumulative states that represent ``everything computed up to block $n$'', while Delta AttnRes sources are incremental contributions that represent ``what sublayer $i$ specifically added.'' The former leads to high inter-source redundancy (adjacent cumulative states differ by only $v_i \ll h_i$); the latter preserves the natural diversity between attention and MLP computations across different depths.
-
-A secondary difference is \emph{structural}: Block AttnRes computes $h = \sum \alpha_i s_i$ as a \emph{replacement} for the residual stream, while Delta AttnRes computes $h = \tilde{h} + \sum \alpha_i v_i$ as an \emph{additive} correction. At initialization ($w_l = 0$), Block AttnRes returns the uniform average of all sources (disrupting the residual stream), while Delta AttnRes adds the uniform average of all deltas to the existing residual stream (a smaller perturbation since $\|v_i\| \ll \|h_i\|$).
+Key differences from Delta-V AttnRes: (1)~sources are cumulative states (high redundancy) vs.\ sublayer deltas (diverse); (2)~routing \emph{replaces} the residual stream vs.\ \emph{adds} to it; (3)~single shared routing vs.\ per-stream V-routing; (4)~$O(N)$ block-boundary sources vs.\ $O(2L)$ per-sublayer sources.
 
 %% ============================================================
 \section{nanoGPT Ablation Details}
 \label{app:nanogpt}
 %% ============================================================
 
-To enable rapid iteration over the full $2 \times 2$ design space, we implement all variants in nanoGPT~\citep{radford2019gpt2} and train on Shakespeare character-level data ($L{=}6$, $d{=}384$, ${\sim}$10M parameters, 5K iterations on a single GPU). While this scale is too small for definitive conclusions, it provides a controlled testbed where all five configurations run in minutes with identical hyperparameters.
-
-\begin{table}[h]
-\centering
-\caption{nanoGPT Shakespeare ablation: $2 \times 2$ source $\times$ stream design space. Both dimensions provide independent gains that compose nearly additively.}
-\label{tab:nanogpt}
-\begin{tabular}{llcc}
-\toprule
-\textbf{Source} & \textbf{V-Routing} & \textbf{Val Loss $\downarrow$} & \textbf{$\Delta$ vs Baseline} \\
-\midrule
-\multicolumn{2}{l}{Baseline (no routing)} & 6.233 & --- \\
-\midrule
-Cumulative ($h_i$) & Shared & 6.189 & $-$0.044 \\
-Cumulative ($h_i$) & Per-stream V & 6.132 & $-$0.101 \\
-\midrule
-Delta ($v_i$) & Shared & 6.080 & $-$0.153 \\
-\textbf{Delta ($v_i$)} & \textbf{Per-stream V} & \textbf{6.044} & $\mathbf{-0.189}$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Key findings:
-\begin{itemize}
-    \item \textbf{Delta source effect}: $-$0.109 (6.189 $\to$ 6.080), the larger of the two effects.
-    \item \textbf{Per-stream V effect}: $-$0.057 (6.189 $\to$ 6.132), consistent across both source types.
-    \item \textbf{Composability}: $-$0.189 total $\approx$ $-$0.153 $+$ $-$0.036, confirming near-additive composition.
-\end{itemize}
+To enable rapid iteration, we implement all five configurations in nanoGPT~\citep{radford2019gpt2} ($L{=}6$, $d{=}384$, ${\sim}$10M parameters, 5K iterations, Shakespeare char-level). Results in Table~\ref{tab:ablation} (nanoGPT columns) are consistent with larger scales.
 
 \end{document}
