@@ -68,6 +68,31 @@ class Qwen3AttnResConfig(Qwen3Config):
 # Core Block-AttnRes operation
 # ---------------------------------------------------------------------------
 
+def capacity_check(weights: torch.Tensor, d: int, threshold: float = 0.01
+) -> tuple[bool, int, int]:
+    """
+    CHECK operation: verify that the effective number of contributing
+    blocks does not exceed the holographic capacity boundary √d.
+
+    The capacity boundary k ≤ √d is a sharp phase transition from
+    holographic computing theory (Plate 1995, Moore 2026). Above √d
+    items in superposition, retrieval fidelity degrades to chance level
+    regardless of how the weights are computed.
+
+    Args:
+        weights: softmax attention weights [N+1, B, T]
+        d: hidden dimension
+        threshold: minimum weight to count as a contribution
+
+    Returns:
+        (within_capacity, effective_k, capacity_limit)
+    """
+    # Count blocks with weight above threshold, averaged over batch/tokens
+    effective_k = (weights > threshold).float().sum(dim=0).mean().item()
+    capacity_limit = int(d ** 0.5)
+    return effective_k <= capacity_limit, int(effective_k), capacity_limit
+
+
 def block_attn_res(
     blocks: list[torch.Tensor],   # completed blocks  [B, T, D] each
     partial_block: torch.Tensor,  # current intra-block partial sum  [B, T, D]
@@ -75,13 +100,23 @@ def block_attn_res(
     norm: Qwen3RMSNorm,           # RMSNorm applied to keys before scoring
     recency_bias: nn.Parameter,   # scalar bias added to partial_block's logit
     return_entropy: bool = False, # if True, also return mean entropy of softmax weights
+    enforce_capacity: bool = False,  # if True, prune to √d effective contributions
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Attend over all block representations + the current partial block.
 
     Returns a [B, T, D] tensor — the attended aggregation of depth history.
     If return_entropy=True, also returns a scalar entropy value.
+
+    When enforce_capacity=True, applies the holographic capacity boundary
+    k ≤ √d: if more than √d blocks contribute meaningfully, the lowest-
+    weight blocks are pruned and weights renormalized. This prevents
+    representation degradation from unchecked accumulation.
+
+    Reference: "Attention Residuals Need a Capacity Boundary" (Moore 2026)
     """
+    D = partial_block.shape[-1]
+
     # Stack everything: shape [N+1, B, T, D]
     V = torch.stack(blocks + [partial_block], dim=0)
 
@@ -98,6 +133,22 @@ def block_attn_res(
 
     # Softmax across block dimension
     weights = logits.softmax(dim=0)                           # (N+1, B, T)
+
+    # ── CHECK: Holographic capacity boundary ──
+    # If effective contributors exceed √d, prune to top-√d.
+    # This is a hard constraint from the capacity boundary k ≤ √d:
+    # above this threshold, superposed representations degrade to
+    # chance-level fidelity regardless of weight quality.
+    if enforce_capacity:
+        within_cap, eff_k, cap_limit = capacity_check(weights, D)
+        if not within_cap and cap_limit < weights.shape[0]:
+            # Keep only top-k blocks by mean weight across batch/tokens
+            mean_weights = weights.mean(dim=(1, 2))          # (N+1,)
+            _, top_indices = mean_weights.topk(cap_limit)
+            mask = torch.zeros(weights.shape[0], device=weights.device)
+            mask[top_indices] = 1.0
+            weights = weights * mask.view(-1, 1, 1)
+            weights = weights / (weights.sum(dim=0, keepdim=True) + 1e-8)
 
     # Weighted sum of values
     h = torch.einsum("n b t, n b t d -> b t d", weights, V)  # (B, T, D)
