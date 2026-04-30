@@ -24,7 +24,7 @@ Standard transformers use additive residual connections:
 h_l = h_{l-1} + f_{l-1}(h_{l-1})
 ```
 
-**Attention Residuals** (Eq. 1 of the paper) replace this with learned depth-wise attention over previous representations:
+**Attention Residuals** replace this with learned depth-wise attention over previous representations:
 
 ```
 h_l = Σ α_{i→l} · s_i
@@ -119,27 +119,9 @@ Total overhead: **0.03% parameters**, **<2% latency**.
 
 3. **Train from scratch for maximum benefit.** Fine-tuning pretrained models yields small gains (~0.02 loss) because pretrained weights are committed to standard residual flow.
 
-4. **Zero-init queries work best.** The paper's default initialization (all projection weights = 0 → uniform softmax) outperforms all alternatives we tried.
-
-## Citation
-
-```bibtex
-@software{luo2025openattnres,
-  title={Open Attention Residuals},
-  author={Cheng Luo and Zefan Cai},
-  url={https://github.com/wdlctc/open-attention-residuals},
-  year={2025}
-}
-
-@article{kimi2025attention,
-  title={Attention Residuals},
-  author={Kimi Team},
-  journal={arXiv preprint arXiv:2603.15031},
-  year={2025}
-}
-```
+4. **Zero-init queries work best.** Default initialization (all projection weights = 0 → uniform softmax) outperforms all alternatives we tried.
 
 ## Acknowledgments
 
-- [Attention Residuals](https://arxiv.org/abs/2603.15031) — Kimi Team (original paper)
+- [Attention Residuals](https://arxiv.org/abs/2603.15031) — Kimi Team (original concept)
 - [Qwen3](https://arxiv.org/abs/2505.09388) — Qwen Team (base architecture)
